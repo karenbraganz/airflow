@@ -2112,12 +2112,21 @@ class DAG(LoggingMixin):
 
         task = self.get_task(task_id)
         task.dag = self
+        dagrun = self.fetch_dagrun(dag_id=self.dag_id, run_id=run_id, session=session)
+        tasks_to_set_state = []
 
         tasks_to_set_state: list[Operator | tuple[Operator, int]]
         if map_indexes is None:
             tasks_to_set_state = [task]
         else:
-            tasks_to_set_state = [(task, map_index) for map_index in map_indexes]
+            for map_index in map_indexes:
+                tasks_to_set_state.append((task, map_index))
+
+                ti = dagrun.get_task_instance(task_id=task_id, session=session, map_index=map_index)
+                context = ti.get_template_context(session=session)
+                jinja_env = self.get_template_env()
+                ti.render_map_index(context, jinja_env=jinja_env)
+                print(f"Rendered Map Index: {ti.rendered_map_index}")
 
         altered = set_state(
             tasks=tasks_to_set_state,
