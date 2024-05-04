@@ -2112,22 +2112,47 @@ class DAG(LoggingMixin):
 
         task = self.get_task(task_id)
         task.dag = self
+
         dagrun = self.fetch_dagrun(dag_id=self.dag_id, run_id=run_id, session=session)
+        # tis = dagrun.get_task_instances(session=session)
+        # tis = [ti for ti in tis if ti.state != TaskInstanceState.REMOVED]
+        # print(f"line 2119 TIS: {tis}")
+        # for task_instance in tis:
+        #     if task_instance.task_id == task_id:
+        #         ti = task_instance
+        #         ti.task = task
+        # print(f"line 2122 Task Instance: {ti}")
+        # context = ti.get_template_context(session=session)
+        # jinja_env = self.get_template_env()
+        # print(f"Jinja env: {jinja_env}")
+        # ti.render_map_index(context=context, jinja_env=jinja_env)
+        # print(f"Rendered Map Index: {ti.rendered_map_index}")
+
+        # print(f"Context: {context}")
         tasks_to_set_state = []
 
         tasks_to_set_state: list[Operator | tuple[Operator, int]]
         if map_indexes is None:
             tasks_to_set_state = [task]
+            # print("line 2121" + f"task:{task}")
         else:
             for map_index in map_indexes:
                 tasks_to_set_state.append((task, map_index))
 
-                ti = dagrun.get_task_instance(task_id=task_id, session=session, map_index=map_index)
-                context = ti.get_template_context(session=session)
+                mapped_ti = dagrun.get_task_instance(task_id=task_id, session=session, map_index=map_index)
+                mapped_ti.task = task
+                context = mapped_ti.get_template_context(session=session)
                 jinja_env = self.get_template_env()
-                ti.render_map_index(context, jinja_env=jinja_env)
-                print(f"Rendered Map Index: {ti.rendered_map_index}")
+                mapped_ti.render_map_index(context, jinja_env=jinja_env)
 
+                # print(f"Jinja env: {jinja_env} Context: {context}")
+                # print(f"line 2143 MTI: {mapped_ti}")
+                # print(f"line 2144 map index: {map_index}")
+                # print(f"line 2145 map indexes: {map_indexes}")
+                # print(f"Rendered Map Index: {mapped_ti.rendered_map_index}")
+                
+        
+        # print(f"Map Indexes {map_indexes}")
         altered = set_state(
             tasks=tasks_to_set_state,
             execution_date=execution_date,
