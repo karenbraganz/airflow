@@ -2149,8 +2149,7 @@ class DAG(LoggingMixin):
                 # print(f"line 2144 map index: {map_index}")
                 # print(f"line 2145 map indexes: {map_indexes}")
                 # print(f"Rendered Map Index: {mapped_ti.rendered_map_index}")
-                
-        
+
         # print(f"Map Indexes {map_indexes}")
         altered = set_state(
             tasks=tasks_to_set_state,
