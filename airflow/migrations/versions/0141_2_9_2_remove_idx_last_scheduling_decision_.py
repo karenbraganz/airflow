@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,27 +15,32 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+"""Remove ``idx_last_scheduling_decision`` index on last_scheduling_decision in dag_run table.
+
+Revision ID: bff083ad727d
+Revises: 1949afb29106
+Create Date: 2024-04-26 12:58:00.594762
+
+"""
+
 from __future__ import annotations
 
-from datetime import datetime
+from alembic import op
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-
-with DAG(
-    dag_id="child_dag",
-    start_date=datetime(2022, 1, 1),
-    schedule="@once",
-    catchup=False,
-    tags=["example", "async", "core"],
-) as dag:
-    dummy_task = BashOperator(
-        task_id="child_task",
-        bash_command="echo 1; sleep 1; echo 2; sleep 2; echo 3; sleep 3",
-    )
+# revision identifiers, used by Alembic.
+revision = "bff083ad727d"
+down_revision = "1949afb29106"
+branch_labels = None
+depends_on = None
+airflow_version = "2.9.2"
 
 
-from tests.system.utils import get_test_run
+def upgrade():
+    """Apply Remove idx_last_scheduling_decision index on last_scheduling_decision in dag_run table."""
+    op.drop_index("idx_last_scheduling_decision", table_name="dag_run")
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
-test_run = get_test_run(dag)
+
+def downgrade():
+    """Unapply Remove idx_last_scheduling_decision index on last_scheduling_decision in dag_run table."""
+    op.create_index("idx_last_scheduling_decision", "dag_run", ["last_scheduling_decision"], unique=False)
