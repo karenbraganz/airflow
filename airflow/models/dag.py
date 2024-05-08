@@ -2143,9 +2143,8 @@ class DAG(LoggingMixin):
                 mapped_ti.task = task
                 context = mapped_ti.get_template_context(session=session)
                 jinja_env = self.get_template_env()
+                print(f" line 2146 Jinja env: {jinja_env} Context: {context}")
                 mapped_ti.render_map_index(context, jinja_env=jinja_env)
-
-                # print(f"Jinja env: {jinja_env} Context: {context}")
                 # print(f"line 2143 MTI: {mapped_ti}")
                 # print(f"line 2144 map index: {map_index}")
                 # print(f"line 2145 map indexes: {map_indexes}")

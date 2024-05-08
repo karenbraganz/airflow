@@ -629,10 +629,12 @@ def _get_template_context(
     integrate_macros_plugins()
 
     task = task_instance.task
+    print(f"line 631 Task: {task}")
+
     if TYPE_CHECKING:
         assert task_instance.task
         assert task
-        assert task.dag
+        assert task.dag           
     try:
         dag: DAG = task.dag
     except AirflowException:
@@ -2285,7 +2287,7 @@ class TaskInstance(Base, LoggingMixin):
         """
         if TYPE_CHECKING:
             assert task_instance.task
-
+        print(f"line 2293 Task: {task_instance.task}")   
         if isinstance(task_instance, TaskInstance):
             ti: TaskInstance = task_instance
         else:  # isinstance(task_instance, TaskInstancePydantic)
@@ -2749,7 +2751,9 @@ class TaskInstance(Base, LoggingMixin):
         """Render named map index if the DAG author defined map_index_template at the task level."""
         if jinja_env is None or (template := context.get("map_index_template")) is None:
             return None
+        print("line 2758 before rendered_map_index is set and after the if block")
         self.rendered_map_index = jinja_env.from_string(template).render(context)
+        print("line 2760 after rendered_map_index is set")
         self.log.debug("Map index rendered as %s", self.rendered_map_index)               
 
     def _execute_task(self, context: Context, task_orig: Operator):
