@@ -182,6 +182,34 @@ def get_merged_defaults(
     return args, params
 
 
+def run_checks_for_tasks(task_args: dict[str, Any]) -> None:
+    """Check and process arguments passed in tasks including partial and expand arguments in mapped tasks."""
+    if task_args.get("wait_for_downstream"):
+        task_args["depends_on_past"] = True
+    task_args["start_date"] = timezone.convert_to_utc(task_args.get("start_date"))
+    task_args["end_date"] = timezone.convert_to_utc(task_args.get("end_date"))
+    if task_args.get("pool") is None:
+        task_args["pool"] = Pool.DEFAULT_POOL_NAME
+    if "pool_slots" in task_args:
+        if task_args["pool_slots"] < 1:
+            dag_str = ""
+            if task_args.get("dag"):
+                dag_str = f" in dag {task_args['dag'].dag_id}"
+            raise ValueError(f"pool slots for {task_args.get('task_id')}{dag_str} cannot be less than 1")
+    task_args["retries"] = parse_retries(task_args.get("retries", DEFAULT_RETRIES))
+    task_args["retry_delay"] = coerce_timedelta(
+        task_args.get("retry_delay", DEFAULT_RETRY_DELAY), key="retry_delay"
+    )
+    if task_args["max_retry_delay"] is not None:
+        max_retry_delay: timedelta | float = task_args["max_retry_delay"]
+        task_args["max_retry_delay"] = coerce_timedelta(
+            max_retry_delay,
+            key="max_retry_delay",
+        )
+    task_args.setdefault("executor_config", {})
+    task_args["resources"] = coerce_resources(task_args.get("resources"))
+
+
 class _PartialDescriptor:
     """A descriptor that guards against ``.partial`` being called on Task objects."""
 
@@ -352,26 +380,10 @@ def partial(
     # Post-process arguments. Should be kept in sync with _TaskDecorator.expand().
     if "task_concurrency" in kwargs:  # Reject deprecated option.
         raise TypeError("unexpected argument: task_concurrency")
-    if partial_kwargs["wait_for_downstream"]:
-        partial_kwargs["depends_on_past"] = True
-    partial_kwargs["start_date"] = timezone.convert_to_utc(partial_kwargs["start_date"])
-    partial_kwargs["end_date"] = timezone.convert_to_utc(partial_kwargs["end_date"])
-    if partial_kwargs["pool"] is None:
-        partial_kwargs["pool"] = Pool.DEFAULT_POOL_NAME
-    if partial_kwargs["pool_slots"] < 1:
-        dag_str = ""
-        if dag:
-            dag_str = f" in dag {dag.dag_id}"
-        raise ValueError(f"pool slots for {task_id}{dag_str} cannot be less than 1")
-    partial_kwargs["retries"] = parse_retries(partial_kwargs["retries"])
-    partial_kwargs["retry_delay"] = coerce_timedelta(partial_kwargs["retry_delay"], key="retry_delay")
-    if partial_kwargs["max_retry_delay"] is not None:
-        partial_kwargs["max_retry_delay"] = coerce_timedelta(
-            partial_kwargs["max_retry_delay"],
-            key="max_retry_delay",
-        )
-    partial_kwargs["executor_config"] = partial_kwargs["executor_config"] or {}
-    partial_kwargs["resources"] = coerce_resources(partial_kwargs["resources"])
+
+    # If any checking/ processing logic needs to run for both regular tasks as well as mapped tasks
+    # (in partial or expand), the logic should be included in run_checks_for_tasks.
+    run_checks_for_tasks(partial_kwargs)
 
     return OperatorPartial(
         operator_class=operator_class,
@@ -933,6 +945,27 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         if not self.__from_mapped and task_group:
             task_group.add(self)
 
+        kwargs_to_check: dict[str, Any] = {
+            "dag": dag,
+            "task_id": task_id,
+            "wait_for_downstream": wait_for_downstream,
+            "depends_on_past": depends_on_past,
+            "start_date": start_date,
+            "end_date": end_date,
+            "pool": pool,
+            "pool_slots": pool_slots,
+            "retries": retries,
+            "retry_delay": retry_delay,
+            "max_retry_delay": max_retry_delay,
+            "executor_config": executor_config,
+            "resources": resources,
+        }
+
+        # Checking/ processing logic for arguments that could be passed in regular tasks
+        # or mapped tasks (in partial or expand) are run in this function.
+
+        run_checks_for_tasks(kwargs_to_check)
+
         self.owner = owner
         self.email = email
         self.email_on_retry = email_on_retry
@@ -955,21 +988,18 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         if start_date and not isinstance(start_date, datetime):
             self.log.warning("start_date for %s isn't datetime.datetime", self)
         elif start_date:
-            self.start_date = timezone.convert_to_utc(start_date)
+            self.start_date = kwargs_to_check["start_date"]
 
         if end_date:
-            self.end_date = timezone.convert_to_utc(end_date)
+            self.end_date = kwargs_to_check["end_date"]
 
         self.executor = executor
-        self.executor_config = executor_config or {}
+        self.executor_config = kwargs_to_check["executor_config"]
         self.run_as_user = run_as_user
-        self.retries = parse_retries(retries)
+        self.retries = kwargs_to_check["retries"]
         self.queue = queue
-        self.pool = Pool.DEFAULT_POOL_NAME if pool is None else pool
+        self.pool = kwargs_to_check["pool"]
         self.pool_slots = pool_slots
-        if self.pool_slots < 1:
-            dag_str = f" in dag {dag.dag_id}" if dag else ""
-            raise ValueError(f"pool slots for {self.task_id}{dag_str} cannot be less than 1")
 
         if sla:
             self.log.warning(
@@ -985,20 +1015,14 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
         self.trigger_rule: TriggerRule = TriggerRule(trigger_rule)
         FailStopDagInvalidTriggerRule.check(dag=dag, trigger_rule=self.trigger_rule)
 
-        self.depends_on_past: bool = depends_on_past
+        self.depends_on_past: bool = kwargs_to_check["depends_on_past"]
         self.ignore_first_depends_on_past: bool = ignore_first_depends_on_past
         self.wait_for_past_depends_before_skipping: bool = wait_for_past_depends_before_skipping
         self.wait_for_downstream: bool = wait_for_downstream
-        if wait_for_downstream:
-            self.depends_on_past = True
 
-        self.retry_delay = coerce_timedelta(retry_delay, key="retry_delay")
+        self.retry_delay = kwargs_to_check["retry_delay"]
         self.retry_exponential_backoff = retry_exponential_backoff
-        self.max_retry_delay = (
-            max_retry_delay
-            if max_retry_delay is None
-            else coerce_timedelta(max_retry_delay, key="max_retry_delay")
-        )
+        self.max_retry_delay = kwargs_to_check["max_retry_delay"]
 
         # At execution_time this becomes a normal dict
         self.params: ParamsDict | dict = ParamsDict(params)
@@ -1009,7 +1033,7 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
             )
         self.priority_weight = priority_weight
         self.weight_rule = validate_and_load_priority_weight_strategy(weight_rule)
-        self.resources = coerce_resources(resources)
+        self.resources = kwargs_to_check["resources"]
         self.max_active_tis_per_dag: int | None = max_active_tis_per_dag
         self.max_active_tis_per_dagrun: int | None = max_active_tis_per_dagrun
         self.do_xcom_push: bool = do_xcom_push

@@ -41,13 +41,10 @@ import re2
 import typing_extensions
 
 from airflow.assets import Asset
-from airflow.models.abstractoperator import DEFAULT_RETRIES, DEFAULT_RETRY_DELAY
 from airflow.models.baseoperator import (
     BaseOperator,
-    coerce_resources,
-    coerce_timedelta,
     get_merged_defaults,
-    parse_retries,
+    run_checks_for_tasks,
 )
 from airflow.models.dag import DagContext
 from airflow.models.expandinput import (
@@ -57,10 +54,8 @@ from airflow.models.expandinput import (
     is_mappable,
 )
 from airflow.models.mappedoperator import MappedOperator, ensure_xcomarg_return_value
-from airflow.models.pool import Pool
 from airflow.models.xcom_arg import XComArg
 from airflow.typing_compat import ParamSpec, Protocol
-from airflow.utils import timezone
 from airflow.utils.context import KNOWN_CONTEXT_KEYS
 from airflow.utils.decorators import remove_task_decorator
 from airflow.utils.helpers import prevent_duplicates
@@ -459,34 +454,16 @@ class _TaskDecorator(ExpandableFactory, Generic[FParams, FReturn, OperatorSubcla
         if task_group:
             task_id = task_group.child_id(task_id)
 
+        partial_kwargs.update({"dag": dag, "task_id": task_id})
+
         # Logic here should be kept in sync with BaseOperatorMeta.partial().
         if "task_concurrency" in partial_kwargs:
             raise TypeError("unexpected argument: task_concurrency")
-        if partial_kwargs.get("wait_for_downstream"):
-            partial_kwargs["depends_on_past"] = True
-        start_date = timezone.convert_to_utc(partial_kwargs.pop("start_date", None))
-        end_date = timezone.convert_to_utc(partial_kwargs.pop("end_date", None))
-        if partial_kwargs.get("pool") is None:
-            partial_kwargs["pool"] = Pool.DEFAULT_POOL_NAME
-        if "pool_slots" in partial_kwargs:
-            if partial_kwargs["pool_slots"] < 1:
-                dag_str = ""
-                if dag:
-                    dag_str = f" in dag {dag.dag_id}"
-                raise ValueError(f"pool slots for {task_id}{dag_str} cannot be less than 1")
-        partial_kwargs["retries"] = parse_retries(partial_kwargs.get("retries", DEFAULT_RETRIES))
-        partial_kwargs["retry_delay"] = coerce_timedelta(
-            partial_kwargs.get("retry_delay", DEFAULT_RETRY_DELAY),
-            key="retry_delay",
-        )
-        max_retry_delay = partial_kwargs.get("max_retry_delay")
-        partial_kwargs["max_retry_delay"] = (
-            max_retry_delay
-            if max_retry_delay is None
-            else coerce_timedelta(max_retry_delay, key="max_retry_delay")
-        )
-        partial_kwargs["resources"] = coerce_resources(partial_kwargs.get("resources"))
-        partial_kwargs.setdefault("executor_config", {})
+
+        # If any checking/ processing logic needs to be run for arguments passed in regular tasks as well as mapped tasks
+        # (in partial or expand), it should be included in run_checks_for_tasks.
+        run_checks_for_tasks(partial_kwargs)
+
         partial_kwargs.setdefault("op_args", [])
         partial_kwargs.setdefault("op_kwargs", {})
 
@@ -517,8 +494,8 @@ class _TaskDecorator(ExpandableFactory, Generic[FParams, FReturn, OperatorSubcla
             operator_name=operator_name,
             dag=dag,
             task_group=task_group,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=partial_kwargs["start_date"],
+            end_date=partial_kwargs["end_date"],
             multiple_outputs=self.multiple_outputs,
             python_callable=self.function,
             op_kwargs_expand_input=expand_input,
