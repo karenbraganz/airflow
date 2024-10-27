@@ -973,7 +973,6 @@ class BaseOperator(AbstractOperator, metaclass=BaseOperatorMeta):
 
         # Checking/ processing logic for arguments that could be passed in regular tasks
         # or mapped tasks (in partial or expand) are run in this function.
-
         run_checks_for_tasks(kwargs_to_check)
 
         self.owner = owner
