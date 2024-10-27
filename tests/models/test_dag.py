@@ -25,7 +25,6 @@ import pickle
 import re
 import weakref
 from datetime import timedelta
-from importlib import reload
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
@@ -45,13 +44,10 @@ from airflow.exceptions import (
     AirflowException,
     DuplicateTaskIdFound,
     ParamValidationError,
-    RemovedInAirflow3Warning,
     UnknownExecutorException,
 )
-from airflow.executors import executor_loader
-from airflow.executors.local_executor import LocalExecutor
-from airflow.executors.sequential_executor import SequentialExecutor
 from airflow.models.asset import (
+    AssetActive,
     AssetAliasModel,
     AssetDagRunQueue,
     AssetEvent,
@@ -74,9 +70,9 @@ from airflow.models.param import DagParam, Param, ParamsDict
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.models.taskfail import TaskFail
 from airflow.models.taskinstance import TaskInstance as TI
-from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
 from airflow.security import permissions
 from airflow.templates import NativeEnvironment, SandboxedEnvironment
 from airflow.timetables.base import DagRunInfo, DataInterval, TimeRestriction, Timetable
@@ -95,6 +91,7 @@ from airflow.utils.timezone import datetime as datetime_tz
 from airflow.utils.trigger_rule import TriggerRule
 from airflow.utils.types import DagRunType
 from airflow.utils.weight_rule import WeightRule
+
 from tests.models import DEFAULT_DATE
 from tests.plugins.priority_weight_strategy import (
     FactorPriorityWeightStrategy,
@@ -102,13 +99,18 @@ from tests.plugins.priority_weight_strategy import (
     StaticTestPriorityWeightStrategy,
     TestPriorityWeightStrategyPlugin,
 )
-from tests.test_utils.asserts import assert_queries_count
-from tests.test_utils.compat import AIRFLOW_V_3_0_PLUS
-from tests.test_utils.config import conf_vars
-from tests.test_utils.db import clear_db_assets, clear_db_dags, clear_db_runs, clear_db_serialized_dags
-from tests.test_utils.mapping import expand_mapped_task
-from tests.test_utils.mock_plugins import mock_plugin_manager
-from tests.test_utils.timetables import cron_timetable, delta_timetable
+from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import (
+    clear_db_assets,
+    clear_db_dags,
+    clear_db_runs,
+    clear_db_serialized_dags,
+)
+from tests_common.test_utils.mapping import expand_mapped_task
+from tests_common.test_utils.mock_plugins import mock_plugin_manager
+from tests_common.test_utils.timetables import cron_timetable, delta_timetable
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.utils.types import DagRunTriggeredByType
@@ -1034,7 +1036,7 @@ class TestDag:
             session.query(
                 TaskOutletAssetReference.task_id,
                 TaskOutletAssetReference.dag_id,
-                TaskOutletAssetReference.dataset_id,
+                TaskOutletAssetReference.asset_id,
             )
             .filter(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
             .all()
@@ -1063,60 +1065,53 @@ class TestDag:
             session.query(
                 TaskOutletAssetReference.task_id,
                 TaskOutletAssetReference.dag_id,
-                TaskOutletAssetReference.dataset_id,
+                TaskOutletAssetReference.asset_id,
             )
             .filter(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
             .all()
         ) == {(task_id, dag_id1, asset2_orm.id)}
 
-    def test_bulk_write_to_db_unorphan_assets(self):
+    @staticmethod
+    def _find_assets_activation(session) -> tuple[list[AssetModel], list[AssetModel]]:
+        assets = session.execute(
+            select(AssetModel, AssetActive)
+            .outerjoin(
+                AssetActive,
+                (AssetModel.name == AssetActive.name) & (AssetModel.uri == AssetActive.uri),
+            )
+            .order_by(AssetModel.uri)
+        ).all()
+        return [a for a, v in assets if not v], [a for a, v in assets if v]
+
+    def test_bulk_write_to_db_does_not_activate(self, dag_maker, session):
         """
-        Assets can lose their last reference and be orphaned, but then if a reference to them reappears, we
-        need to un-orphan those assets
+        Assets are not activated on write, but later in the scheduler by the SchedulerJob.
         """
-        with create_session() as session:
-            # Create four assets - two that have references and two that are unreferenced and marked as
-            # orphans
-            asset1 = Asset(uri="ds1")
-            asset2 = Asset(uri="ds2")
-            session.add(AssetModel(uri=asset2.uri, is_orphaned=True))
-            asset3 = Asset(uri="ds3")
-            asset4 = Asset(uri="ds4")
-            session.add(AssetModel(uri=asset4.uri, is_orphaned=True))
-            session.flush()
+        # Create four assets - two that have references and two that are unreferenced and marked as
+        # orphans
+        asset1 = Asset(uri="ds1")
+        asset2 = Asset(uri="ds2")
+        asset3 = Asset(uri="ds3")
+        asset4 = Asset(uri="ds4")
 
-            dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1])
-            BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3])
+        dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1])
+        BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3])
+        DAG.bulk_write_to_db([dag1], session=session)
 
-            DAG.bulk_write_to_db([dag1], session=session)
+        assert session.scalars(select(AssetModel).order_by(AssetModel.uri)).all() == [asset1, asset3]
+        assert session.scalars(select(AssetActive)).all() == []
 
-            # Double check
-            non_orphaned_assets = [
-                asset.uri
-                for asset in session.query(AssetModel.uri)
-                .filter(~AssetModel.is_orphaned)
-                .order_by(AssetModel.uri)
-            ]
-            assert non_orphaned_assets == ["ds1", "ds3"]
-            orphaned_assets = [
-                asset.uri
-                for asset in session.query(AssetModel.uri)
-                .filter(AssetModel.is_orphaned)
-                .order_by(AssetModel.uri)
-            ]
-            assert orphaned_assets == ["ds2", "ds4"]
+        dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1, asset2])
+        BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3, asset4])
+        DAG.bulk_write_to_db([dag1], session=session)
 
-            # Now add references to the two unreferenced assets
-            dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1, asset2])
-            BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3, asset4])
-
-            DAG.bulk_write_to_db([dag1], session=session)
-
-            # and count the orphans and non-orphans
-            non_orphaned_asset_count = session.query(AssetModel).filter(~AssetModel.is_orphaned).count()
-            assert non_orphaned_asset_count == 4
-            orphaned_asset_count = session.query(AssetModel).filter(AssetModel.is_orphaned).count()
-            assert orphaned_asset_count == 0
+        assert session.scalars(select(AssetModel).order_by(AssetModel.uri)).all() == [
+            asset1,
+            asset2,
+            asset3,
+            asset4,
+        ]
+        assert session.scalars(select(AssetActive)).all() == []
 
     def test_bulk_write_to_db_asset_aliases(self):
         """
@@ -2173,6 +2168,7 @@ my_postgres_conn:
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 5, 4)
 
+    @pytest.mark.usefixtures("clear_all_logger_handlers")
     def test_next_dagrun_info_timetable_exception(self, caplog):
         """Test the DAG does not crash the scheduler if the timetable raises an exception."""
 
@@ -2296,14 +2292,14 @@ my_postgres_conn:
     )
     def test_access_control_format(self, fab_version, perms, expected_exception, expected_perms):
         if expected_exception:
-            with patch("airflow.models.dag.FAB_VERSION", fab_version):
+            with patch("airflow.providers.fab.__version__", fab_version):
                 with pytest.raises(
                     expected_exception,
                     match="Please upgrade the FAB provider to a version >= 1.3.0 to allow use the Dag Level Access Control new format.",
                 ):
                     DAG(dag_id="dag_test", schedule=None, access_control=perms)
         else:
-            with patch("airflow.models.dag.FAB_VERSION", fab_version):
+            with patch("airflow.providers.fab.__version__", fab_version):
                 dag = DAG(dag_id="dag_test", schedule=None, access_control=perms)
             assert dag.access_control == expected_perms
 
@@ -2450,8 +2446,8 @@ class TestDagModel:
 
         # add queue records so we'll need a run
         dag_model = session.query(DagModel).filter(DagModel.dag_id == dag.dag_id).one()
-        asset_model: AssetModel = dag_model.schedule_datasets[0]
-        session.add(AssetDagRunQueue(dataset_id=asset_model.id, target_dag_id=dag_model.dag_id))
+        asset_model: AssetModel = dag_model.schedule_assets[0]
+        session.add(AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id))
         session.flush()
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
@@ -2459,7 +2455,7 @@ class TestDagModel:
 
         # create run so we don't need a run anymore (due to max active runs)
         dag_maker.create_dagrun(
-            run_type=DagRunType.DATASET_TRIGGERED,
+            run_type=DagRunType.ASSET_TRIGGERED,
             state=DagRunState.QUEUED,
             execution_date=pendulum.now("UTC"),
         )
@@ -2478,7 +2474,7 @@ class TestDagModel:
         # link asset_alias hello_alias to asset hello
         asset_model = AssetModel(uri="hello")
         asset_alias_model = AssetAliasModel(name="hello_alias")
-        asset_alias_model.datasets.append(asset_model)
+        asset_alias_model.assets.append(asset_model)
         session.add_all([asset_model, asset_alias_model])
         session.commit()
 
@@ -2498,8 +2494,8 @@ class TestDagModel:
 
         # add queue records so we'll need a run
         dag_model = dag_maker.dag_model
-        asset_model: AssetModel = dag_model.schedule_datasets[0]
-        session.add(AssetDagRunQueue(dataset_id=asset_model.id, target_dag_id=dag_model.dag_id))
+        asset_model: AssetModel = dag_model.schedule_assets[0]
+        session.add(AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id))
         session.flush()
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
@@ -2507,7 +2503,7 @@ class TestDagModel:
 
         # create run so we don't need a run anymore (due to max active runs)
         dag_maker.create_dagrun(
-            run_type=DagRunType.DATASET_TRIGGERED,
+            run_type=DagRunType.ASSET_TRIGGERED,
             state=DagRunState.QUEUED,
             execution_date=pendulum.now("UTC"),
         )
@@ -2676,7 +2672,7 @@ class TestDagModel:
 
             session.add(
                 AssetEvent(
-                    dataset_id=asset_id,
+                    asset_id=asset_id,
                     source_task_id="task",
                     source_dag_id=dr.dag_id,
                     source_run_id=dr.run_id,
@@ -2693,9 +2689,9 @@ class TestDagModel:
         session.flush()
         session.add_all(
             [
-                AssetDagRunQueue(dataset_id=asset1_id, target_dag_id=dag.dag_id, created_at=DEFAULT_DATE),
+                AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag.dag_id, created_at=DEFAULT_DATE),
                 AssetDagRunQueue(
-                    dataset_id=asset2_id,
+                    asset_id=asset2_id,
                     target_dag_id=dag.dag_id,
                     created_at=DEFAULT_DATE + timedelta(hours=1),
                 ),
@@ -2703,10 +2699,10 @@ class TestDagModel:
         )
         session.flush()
 
-        query, dataset_triggered_dag_info = DagModel.dags_needing_dagruns(session)
-        assert 1 == len(dataset_triggered_dag_info)
-        assert dag.dag_id in dataset_triggered_dag_info
-        first_queued_time, last_queued_time = dataset_triggered_dag_info[dag.dag_id]
+        query, asset_triggered_dag_info = DagModel.dags_needing_dagruns(session)
+        assert 1 == len(asset_triggered_dag_info)
+        assert dag.dag_id in asset_triggered_dag_info
+        first_queued_time, last_queued_time = asset_triggered_dag_info[dag.dag_id]
         assert first_queued_time == DEFAULT_DATE
         assert last_queued_time == DEFAULT_DATE + timedelta(hours=1)
 
@@ -2714,10 +2710,10 @@ class TestDagModel:
         dag = DAG(
             dag_id="test_dag_asset_expression",
             schedule=AssetAny(
-                Asset("s3://dag1/output_1.txt", {"hi": "bye"}),
+                Asset("s3://dag1/output_1.txt", extra={"hi": "bye"}),
                 AssetAll(
-                    Asset("s3://dag2/output_1.txt", {"hi": "bye"}),
-                    Asset("s3://dag3/output_3.txt", {"hi": "bye"}),
+                    Asset("s3://dag2/output_1.txt", extra={"hi": "bye"}),
+                    Asset("s3://dag3/output_3.txt", extra={"hi": "bye"}),
                 ),
                 AssetAlias(name="test_name"),
             ),
@@ -2725,7 +2721,7 @@ class TestDagModel:
         )
         DAG.bulk_write_to_db([dag], session=session)
 
-        expression = session.scalars(select(DagModel.dataset_expression).filter_by(dag_id=dag.dag_id)).one()
+        expression = session.scalars(select(DagModel.asset_expression).filter_by(dag_id=dag.dag_id)).one()
         assert expression == {
             "any": [
                 "s3://dag1/output_1.txt",
@@ -2733,20 +2729,6 @@ class TestDagModel:
                 {"alias": "test_name"},
             ]
         }
-
-    @mock.patch("airflow.models.dag.run_job")
-    def test_dag_executors(self, run_job_mock):
-        # todo: AIP-78 remove along with DAG.run()
-        #  this only tests the backfill job runner, not the scheduler
-        with pytest.warns(RemovedInAirflow3Warning):
-            dag = DAG(dag_id="test", schedule=None)
-            reload(executor_loader)
-            with conf_vars({("core", "executor"): "SequentialExecutor"}):
-                dag.run()
-                assert isinstance(run_job_mock.call_args_list[0].kwargs["job"].executor, SequentialExecutor)
-
-                dag.run(local=True)
-                assert isinstance(run_job_mock.call_args_list[1].kwargs["job"].executor, LocalExecutor)
 
 
 class TestQueries:
@@ -3270,6 +3252,7 @@ def test_iter_dagrun_infos_between(start_date, expected_infos):
     assert expected_infos == list(iterator)
 
 
+@pytest.mark.usefixtures("clear_all_logger_handlers")
 def test_iter_dagrun_infos_between_error(caplog):
     start = pendulum.instance(DEFAULT_DATE - datetime.timedelta(hours=1))
     end = pendulum.instance(DEFAULT_DATE)
@@ -3446,8 +3429,8 @@ def test_get_asset_triggered_next_run_info(dag_maker, clear_assets):
     asset1_id = session.query(AssetModel.id).filter_by(uri=asset1.uri).scalar()
     session.bulk_save_objects(
         [
-            AssetDagRunQueue(dataset_id=asset1_id, target_dag_id=dag2.dag_id),
-            AssetDagRunQueue(dataset_id=asset1_id, target_dag_id=dag3.dag_id),
+            AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag2.dag_id),
+            AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag3.dag_id),
         ]
     )
     session.flush()
@@ -3476,9 +3459,9 @@ def test_get_asset_triggered_next_run_info(dag_maker, clear_assets):
 
 
 @pytest.mark.need_serialized_dag
-def test_get_dataset_triggered_next_run_info_with_unresolved_dataset_alias(dag_maker, clear_assets):
-    dataset_alias1 = AssetAlias(name="alias")
-    with dag_maker(dag_id="dag-1", schedule=[dataset_alias1]):
+def test_get_asset_triggered_next_run_info_with_unresolved_asset_alias(dag_maker, clear_assets):
+    asset_alias1 = AssetAlias(name="alias")
+    with dag_maker(dag_id="dag-1", schedule=[asset_alias1]):
         pass
     dag1 = dag_maker.dag
     session = dag_maker.session
@@ -3512,7 +3495,7 @@ def test_dag_uses_timetable_for_run_id(session):
 
 @pytest.mark.parametrize(
     "run_id_type",
-    [DagRunType.BACKFILL_JOB, DagRunType.SCHEDULED, DagRunType.DATASET_TRIGGERED],
+    [DagRunType.BACKFILL_JOB, DagRunType.SCHEDULED, DagRunType.ASSET_TRIGGERED],
 )
 def test_create_dagrun_disallow_manual_to_use_automated_run_id(run_id_type: DagRunType) -> None:
     dag = DAG(dag_id="test", start_date=DEFAULT_DATE, schedule="@daily")
