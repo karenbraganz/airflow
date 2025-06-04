@@ -1951,6 +1951,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     self._maybe_requeue_stuck_ti(
                         ti=ti,
                         session=session,
+                        executor=executor,
                     )
                     session.commit()
             except NotImplementedError:
@@ -1966,7 +1967,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
             )
         )
 
-    def _maybe_requeue_stuck_ti(self, *, ti, session):
+    def _maybe_requeue_stuck_ti(self, *, ti, session, executor):
         """
         Requeue task if it has not been attempted too many times.
 
@@ -1998,7 +1999,7 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
                     extra=f"Task was requeued more than {self._num_stuck_queued_retries} times and will be failed.",
                 )
             )
-            ti.set_state(TaskInstanceState.FAILED, session=session)
+            executor.fail(ti.key)
 
     def _reschedule_stuck_task(self, ti: TaskInstance, session: Session):
         session.execute(
