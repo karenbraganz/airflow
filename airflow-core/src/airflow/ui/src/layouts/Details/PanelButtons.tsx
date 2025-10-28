@@ -41,24 +41,27 @@ import { MdOutlineAccountTree } from "react-icons/md";
 import { useParams } from "react-router-dom";
 import { useLocalStorage } from "usehooks-ts";
 
-import type { DagRunType } from "openapi/requests/types.gen";
+import type { DagRunState, DagRunType } from "openapi/requests/types.gen";
 import { DagVersionSelect } from "src/components/DagVersionSelect";
 import { directionOptions, type Direction } from "src/components/Graph/useGraphLayout";
 import { RunTypeIcon } from "src/components/RunTypeIcon";
 import { SearchBar } from "src/components/SearchBar";
+import { StateBadge } from "src/components/StateBadge";
 import { Button, Tooltip } from "src/components/ui";
 import { Checkbox } from "src/components/ui/Checkbox";
-import { dagRunTypeOptions } from "src/constants/stateOptions";
+import { dagRunTypeOptions, dagRunStateOptions } from "src/constants/stateOptions";
 import { useContainerWidth } from "src/utils/useContainerWidth";
 
 import { DagRunSelect } from "./DagRunSelect";
 import { ToggleGroups } from "./ToggleGroups";
 
 type Props = {
+  readonly dagRunStateFilter: DagRunState | undefined;
   readonly dagView: string;
   readonly limit: number;
   readonly panelGroupRef: React.RefObject<{ setLayout?: (layout: Array<number>) => void } & HTMLDivElement>;
   readonly runTypeFilter: DagRunType | undefined;
+  readonly setDagRunStateFilter: React.Dispatch<React.SetStateAction<DagRunState | undefined>>;
   readonly setDagView: (x: "graph" | "grid") => void;
   readonly setLimit: React.Dispatch<React.SetStateAction<number>>;
   readonly setRunTypeFilter: React.Dispatch<React.SetStateAction<DagRunType | undefined>>;
@@ -102,10 +105,12 @@ const deps = ["all", "immediate", "tasks"];
 type Dependency = (typeof deps)[number];
 
 export const PanelButtons = ({
+  dagRunStateFilter,
   dagView,
   limit,
   panelGroupRef,
   runTypeFilter,
+  setDagRunStateFilter,
   setDagView,
   setLimit,
   setRunTypeFilter,
@@ -170,6 +175,16 @@ export const PanelButtons = ({
     }
   };
 
+  const handleDagRunStateChange = (event: SelectValueChangeDetails<string>) => {
+    const [val] = event.value;
+
+    if (val === undefined || val === "all") {
+      setDagRunStateFilter(undefined);
+    } else {
+      setDagRunStateFilter(val as DagRunState);
+    }
+  };
+
   const handleTriggeringUserChange = (value: string) => {
     const trimmedValue = value.trim();
 
@@ -208,11 +223,13 @@ export const PanelButtons = ({
   );
 
   return (
-    <Box position="absolute" ref={containerRef} top={1} width="100%" zIndex={1}>
-      <Flex justifyContent="space-between">
+    <Box position="absolute" px={2} ref={containerRef} top={1} width="100%" zIndex={1}>
+      <Flex justifyContent="space-between" pl={2}>
         <ButtonGroup attached size="sm" variant="outline">
           <IconButton
             aria-label={translate("dag:panel.buttons.showGridShortcut")}
+            bg={dagView === "grid" ? "brand.500" : "bg.subtle"}
+            color={dagView === "grid" ? "white" : "fg.default"}
             colorPalette="brand"
             onClick={() => {
               setDagView("grid");
@@ -221,12 +238,13 @@ export const PanelButtons = ({
               }
             }}
             title={translate("dag:panel.buttons.showGridShortcut")}
-            variant={dagView === "grid" ? "solid" : "outline"}
           >
             <FiGrid />
           </IconButton>
           <IconButton
             aria-label={translate("dag:panel.buttons.showGraphShortcut")}
+            bg={dagView === "graph" ? "brand.500" : "bg.subtle"}
+            color={dagView === "graph" ? "white" : "fg.default"}
             colorPalette="brand"
             onClick={() => {
               setDagView("graph");
@@ -235,19 +253,18 @@ export const PanelButtons = ({
               }
             }}
             title={translate("dag:panel.buttons.showGraphShortcut")}
-            variant={dagView === "graph" ? "solid" : "outline"}
           >
             <MdOutlineAccountTree />
           </IconButton>
         </ButtonGroup>
-        <Flex gap={1} mr={3}>
+        <Flex alignItems="center" gap={1} justifyContent="space-between" pl={2} pr={6}>
           <ToggleGroups />
           {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
           <Popover.Root autoFocus={false} positioning={{ placement: "bottom-end" }}>
             <Popover.Trigger asChild>
-              <Button size="sm" variant="outline">
+              <Button bg="bg.subtle" color="fg.default" size="sm" variant="outline">
                 {translate("dag:panel.buttons.options")}
-                <FiChevronDown size="0.5rem" />
+                <FiChevronDown size={8} />
               </Button>
             </Popover.Trigger>
             <Portal>
@@ -388,6 +405,51 @@ export const PanelButtons = ({
                                       <RunTypeIcon runType={option.value as DagRunType} />
                                       {translate(option.label)}
                                     </Flex>
+                                  )}
+                                </Select.Item>
+                              ))}
+                            </Select.Content>
+                          </Select.Positioner>
+                        </Select.Root>
+                        <Select.Root
+                          // @ts-expect-error The expected option type is incorrect
+                          collection={dagRunStateOptions}
+                          data-testid="dag-run-state-filter"
+                          onValueChange={handleDagRunStateChange}
+                          size="sm"
+                          value={[dagRunStateFilter ?? "all"]}
+                        >
+                          <Select.Label>{translate("common:state")}</Select.Label>
+                          <Select.Control>
+                            <Select.Trigger>
+                              <Select.ValueText>
+                                {dagRunStateFilter ? (
+                                  <StateBadge state={dagRunStateFilter}>
+                                    {translate(
+                                      dagRunStateOptions.items.find(
+                                        (item) => item.value === dagRunStateFilter,
+                                      )?.label ?? "",
+                                    )}
+                                  </StateBadge>
+                                ) : (
+                                  translate("dags:filters.allStates")
+                                )}
+                              </Select.ValueText>
+                            </Select.Trigger>
+                            <Select.IndicatorGroup>
+                              <Select.Indicator />
+                            </Select.IndicatorGroup>
+                          </Select.Control>
+                          <Select.Positioner>
+                            <Select.Content>
+                              {dagRunStateOptions.items.map((option) => (
+                                <Select.Item item={option} key={option.value}>
+                                  {option.value === "all" ? (
+                                    translate(option.label)
+                                  ) : (
+                                    <StateBadge state={option.value as DagRunState}>
+                                      {translate(option.label)}
+                                    </StateBadge>
                                   )}
                                 </Select.Item>
                               ))}
